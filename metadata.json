@@ -1,0 +1,5 @@
+{
+  "name": "Copy of Transcriptome Analyst AI",
+  "description": "An AI-powered application to automatically analyze and visualize transcriptomic data, providing insights into differential gene expression and biological pathways.",
+  "requestFramePermissions": []
+}
