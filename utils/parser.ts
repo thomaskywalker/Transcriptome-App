@@ -14,7 +14,7 @@ export const detectGeneIdentifier = (ids: string[]): GeneIdentifierType => {
         ensembl: 0, entrez: 0, uniprot: 0, symbol: 0, unknown: 0,
     };
 
-    const testIds = ids.slice(0, 100).map(id => id.split('.')[0]); // Test on a subset for performance and ignore versions
+    const testIds = ids.slice(0, 100);
 
     for (const id of testIds) {
         if (IDENTIFIER_REGEX.ensembl.test(id)) scores.ensembl++;
@@ -23,11 +23,11 @@ export const detectGeneIdentifier = (ids: string[]): GeneIdentifierType => {
         else if (IDENTIFIER_REGEX.symbol.test(id)) scores.symbol++;
     }
     
-    // UniProt and Symbol can overlap with Ensembl (e.g. versioned IDs), so check Ensembl first.
-    if (scores.ensembl > testIds.length * 0.7) return 'ensembl';
-    if (scores.uniprot > testIds.length * 0.7) return 'uniprot';
-    if (scores.entrez > testIds.length * 0.7) return 'entrez';
-    if (scores.symbol > testIds.length * 0.5) return 'symbol';
+    // Check most specific patterns first
+    if (scores.ensembl / testIds.length > 0.7) return 'ensembl';
+    if (scores.uniprot / testIds.length > 0.7) return 'uniprot';
+    if (scores.entrez / testIds.length > 0.7) return 'entrez';
+    if (scores.symbol / testIds.length > 0.5) return 'symbol';
 
     return 'unknown';
 };
@@ -41,35 +41,47 @@ export const parseCountMatrix = (fileContent: string): { matrix: CountMatrix, id
     const delimiter = headerLine.includes('\t') ? '\t' : ',';
     const headers = headerLine.split(delimiter).map(h => h.replace(/"/g, ''));
 
-    const geneColName = headers[0];
     const sampleNames = headers.slice(1);
-
-    const matrix: CountMatrix = {};
-    const geneIds: string[] = [];
+    const rawMatrix: { [key: string]: { [key: string]: number } } = {};
+    const rawGeneIds: string[] = [];
 
     for (let i = 1; i < lines.length; i++) {
         const values = lines[i].trim().split(delimiter);
         if (values.length < headers.length) continue;
 
-        let geneId = values[0].replace(/"/g, '');
+        const geneId = values[0].replace(/"/g, '');
         if (!geneId) continue;
 
-        // Trim Ensembl version numbers
-        geneId = geneId.split('.')[0];
-
-        geneIds.push(geneId);
-        matrix[geneId] = {};
-
+        rawGeneIds.push(geneId);
+        rawMatrix[geneId] = {};
         for (let j = 1; j < headers.length; j++) {
-            const sampleName = sampleNames[j-1];
+            const sampleName = sampleNames[j - 1];
             const count = parseInt(values[j], 10);
             if (!isNaN(count)) {
-                matrix[geneId][sampleName] = count;
+                rawMatrix[geneId][sampleName] = count;
             }
         }
     }
 
-    const identifierType = detectGeneIdentifier(geneIds);
+    const identifierType = detectGeneIdentifier(rawGeneIds);
+    const matrix: CountMatrix = {};
+
+    // Process IDs based on detected type
+    for (const rawId of rawGeneIds) {
+        let finalId = rawId;
+        if (identifierType === 'ensembl') {
+            finalId = rawId.split('.')[0]; // Trim version only if we're sure it's Ensembl
+        }
+        
+        // Handle cases where trimming might cause ID collisions
+        if (matrix[finalId]) {
+             for (const sample of sampleNames) {
+                matrix[finalId][sample] = (matrix[finalId][sample] || 0) + (rawMatrix[rawId][sample] || 0);
+            }
+        } else {
+             matrix[finalId] = rawMatrix[rawId];
+        }
+    }
 
     return { matrix, identifierType };
 };
@@ -147,6 +159,7 @@ export const convertIdsToSymbols = async (
     ids: string[],
     inputType: GeneIdentifierType
 ): Promise<{ [key: string]: string }> => {
+    // MyGene.info is good at handling versioned Ensembl IDs, so no pre-trimming needed here.
     const scopes = 'ensembl.gene,entrezgene,uniprot'; // Scopes to search in mygene.info
     const conversionMap: { [key: string]: string } = {};
     const batchSize = 1000;

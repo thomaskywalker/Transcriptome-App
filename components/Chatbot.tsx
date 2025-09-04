@@ -1,24 +1,26 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import type { ChatMessage, GeneData } from '../types';
-import { getChatResponseStream } from '../services/geminiService';
+import { getChatResponseStream, initChat, resetChat } from '../services/geminiService';
 
 const ChatIcon: React.FC<{ className?: string }> = ({ className }) => (
-    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
 );
 
 const CloseIcon: React.FC<{ className?: string }> = ({ className }) => (
-    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
 );
 
 const SendIcon: React.FC<{ className?: string }> = ({ className }) => (
-    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
 );
 
 interface ChatbotProps {
     degResults: GeneData[];
+    pValueThreshold: number;
 }
 
-const Chatbot: React.FC<ChatbotProps> = ({ degResults }) => {
+const Chatbot: React.FC<ChatbotProps> = ({ degResults, pValueThreshold }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState<ChatMessage[]>([
         { role: 'model', text: 'Hello! Ask me anything about your analysis results.' }
@@ -26,6 +28,19 @@ const Chatbot: React.FC<ChatbotProps> = ({ degResults }) => {
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        // Initialize the chat session whenever the DEG results change.
+        // The history passed here is only for the *initial* setup.
+        // We only want the system prompt, so we pass an empty history.
+        initChat(degResults, pValueThreshold, []); 
+        
+        // When the component unmounts or results change, reset the chat instance.
+        return () => {
+            resetChat();
+        };
+    }, [degResults, pValueThreshold]);
+
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -40,13 +55,13 @@ const Chatbot: React.FC<ChatbotProps> = ({ degResults }) => {
         if (!input.trim() || isLoading) return;
 
         const userMessage: ChatMessage = { role: 'user', text: input };
-        const currentMessages = [...messages, userMessage];
-        setMessages(currentMessages);
+        setMessages(prev => [...prev, userMessage]);
         setInput('');
         setIsLoading(true);
 
         try {
-            const stream = await getChatResponseStream(input, currentMessages, degResults);
+            // Since chat is initialized, we just send the message.
+            const stream = await getChatResponseStream(input);
             let modelResponse = '';
             setMessages(prev => [...prev, { role: 'model', text: '' }]);
 

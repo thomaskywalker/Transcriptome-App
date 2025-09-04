@@ -1,3 +1,4 @@
+
 export interface GeneData {
   gene: string;
   log2FoldChange: number;
@@ -6,9 +7,22 @@ export interface GeneData {
   averageExpression?: number; // Note: This will be the baseMean from DESeq2
 }
 
-export type AnalysisType = 'summary' | 'pathway' | 'volcano' | 'ma_plot' | 'heatmap';
+export type AnalysisType = 'summary' | 'volcano' | 'ma_plot' | 'heatmap' | 'gsea';
 
 export type ClusteringMethod = 'ward.D2' | 'complete' | 'average' | 'single';
+
+export interface GseaResult {
+    ID: string;
+    Description: string;
+    setSize: number;
+    enrichmentScore: number;
+    NES: number;
+    pvalue: number;
+    'p.adjust': number;
+    core_enrichment: string;
+}
+
+export type GseaDatabase = 'GO' | 'KEGG';
 
 export interface AnalysisResult {
     type: AnalysisType;
@@ -17,6 +31,10 @@ export interface AnalysisResult {
         up: GeneData[];
         down: GeneData[];
     };
+    gseaData?: {
+        db: GseaDatabase;
+        results: GseaResult[];
+    }
 }
 
 export type GeneIdentifierType = 'symbol' | 'ensembl' | 'entrez' | 'uniprot' | 'unknown';

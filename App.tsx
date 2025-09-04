@@ -4,7 +4,8 @@ import Sidebar from './components/Sidebar';
 import ResultsDisplay from './components/ResultsDisplay';
 import Header from './components/Header';
 import Chatbot from './components/Chatbot';
-import type { AnalysisType, AnalysisResult, GeneData, SampleMetadata, GeneIdentifierType, CountMatrix } from './types';
+import RConsole from './components/RConsole';
+import type { AnalysisType, AnalysisResult, GeneData, SampleMetadata, GeneIdentifierType, CountMatrix, GseaResult, GseaDatabase } from './types';
 import { parseCountMatrix, parseTextMetadata, parseExcelMetadata, convertIdsToSymbols, remapMatrixToSymbols } from './utils/parser';
 import { getAnalysisFromGemini, resetChat } from './services/geminiService';
 import { RService } from './services/rService';
@@ -27,17 +28,31 @@ const App: React.FC = () => {
   
   // R Service State
   const [isRReady, setIsRReady] = useState(false);
+  const [isRConsoleOpen, setIsRConsoleOpen] = useState(false);
+  const [rConsoleLogs, setRConsoleLogs] = useState<string>('');
+  
+  const handleRLog = useCallback((log: string) => {
+    setRConsoleLogs(prev => prev + log);
+  }, []);
 
   // Analysis state
-  const [degResults, setDegResults] = useState<GeneData[] | null>(null);
+  const [degResults, setDegResults] = useState<{ [key: string]: GeneData[] } | null>(null);
+  const [gseaResults, setGseaResults] = useState<{ [key: string]: { [db in GseaDatabase]?: GseaResult[] } }>({});
   const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisResult | null>(null);
+  const [currentComparison, setCurrentComparison] = useState<string | null>(null);
+  
+  // User Configuration
+  const [pValueThreshold, setPValueThreshold] = useState<number>(0.05);
 
   useEffect(() => {
     const initializeR = async () => {
         setIsLoading(true);
         setLoadingMessage('Initializing R environment...');
         try {
-            await rService.init((msg: string) => setLoadingMessage(msg));
+            await rService.init(
+                (msg: string) => setLoadingMessage(msg),
+                handleRLog
+            );
             setIsRReady(true);
         } catch (e: any) {
             setError(`Failed to initialize R environment: ${e.message}`);
@@ -47,13 +62,17 @@ const App: React.FC = () => {
         }
     };
     initializeR();
-  }, []);
+  }, [handleRLog]);
 
 
   const conditions = useMemo(() => {
     if (!sampleMetadata) return [];
     return [...new Set(Object.values(sampleMetadata))];
   }, [sampleMetadata]);
+
+  const comparisons = useMemo(() => {
+    return degResults ? Object.keys(degResults) : [];
+  }, [degResults]);
 
   const handleCountMatrixUpload = useCallback(async (file: File) => {
     setIsLoading(true);
@@ -63,6 +82,8 @@ const App: React.FC = () => {
     setDegResults(null);
     setCurrentAnalysis(null);
     setDataFileName(file.name);
+    setCurrentComparison(null);
+    setGseaResults({});
 
     try {
         const text = await file.text();
@@ -104,6 +125,8 @@ const App: React.FC = () => {
     setDegResults(null);
     setCurrentAnalysis(null);
     setMetadataFileName(file.name);
+    setCurrentComparison(null);
+    setGseaResults({});
 
     const reader = new FileReader();
     const fileExtension = file.name.split('.').pop()?.toLowerCase();
@@ -142,7 +165,7 @@ const App: React.FC = () => {
     }
   };
 
-  const handlePrimaryAnalysis = useCallback(async (conditionA: string, conditionB: string) => {
+  const handlePrimaryAnalysis = useCallback(async (comparisonsToRun: {A: string, B: string}[]) => {
     if (!countMatrix || !sampleMetadata) {
       setError('Count matrix and metadata are required for analysis.');
       return;
@@ -153,42 +176,55 @@ const App: React.FC = () => {
     }
     
     setIsLoading(true);
-    setLoadingMessage('Running DESeq2 analysis in R...');
     setError(null);
     setDegResults(null);
     setCurrentAnalysis(null);
+    setCurrentComparison(null);
+    setGseaResults({});
 
+    const allResults: { [key: string]: GeneData[] } = {};
+    
     try {
-      const results = await rService.runDeseq2(countMatrix, sampleMetadata, conditionA, conditionB);
-      setDegResults(results);
+        for (const comp of comparisonsToRun) {
+            const comparisonName = `${comp.B}_vs_${comp.A}`;
+            setLoadingMessage(`Running DESeq2 for ${comparisonName}...`);
+            const results = await rService.runDeseq2(countMatrix, sampleMetadata, comp.A, comp.B);
+            allResults[comparisonName] = results;
+        }
 
-      // After DEG, immediately get an AI summary
-      setLoadingMessage('Getting AI interpretation...');
-      const summaryResult = await getAnalysisFromGemini('summary', results);
-      setCurrentAnalysis(summaryResult);
+        setDegResults(allResults);
+        const firstComparison = Object.keys(allResults)[0];
+        setCurrentComparison(firstComparison);
+
+        // After all DEG runs, get an AI summary for the first one
+        setLoadingMessage('Getting AI interpretation...');
+        const summaryResult = await getAnalysisFromGemini('summary', allResults[firstComparison], pValueThreshold);
+        setCurrentAnalysis(summaryResult);
 
     } catch (e: any) {
       setError(`Analysis failed: ${e.message}`);
     } finally {
       setIsLoading(false);
     }
-  }, [countMatrix, sampleMetadata, isRReady]);
+  }, [countMatrix, sampleMetadata, isRReady, pValueThreshold]);
 
-  const handleSubsequentAnalysis = useCallback(async (analysisType: AnalysisType) => {
-    if (!degResults) {
+
+  // FIX: Replaced the incorrect `Omit<AnalysisType, 'pathway'>` with a more specific union type to fix the TypeScript error.
+  const handleSubsequentAnalysis = useCallback(async (analysisType: 'summary' | 'volcano' | 'ma_plot' | 'heatmap') => {
+    if (!degResults || !currentComparison) {
       setError('Please run the primary Differential Expression Analysis first.');
       return;
     }
+    const currentData = degResults[currentComparison];
     
-    // For plots, we don't need a new AI call, just set the type to render
     if (analysisType === 'volcano' || analysisType === 'ma_plot' || analysisType === 'heatmap') {
-         if (analysisType === 'ma_plot' && (!degResults[0].averageExpression || isNaN(degResults[0].averageExpression))) {
+         if (analysisType === 'ma_plot' && (!currentData[0].averageExpression || isNaN(currentData[0].averageExpression))) {
             setError("MA Plot requires an 'averageExpression' or 'baseMean' value, which was not found in the DESeq2 results.");
             return;
         }
         setCurrentAnalysis({
             type: analysisType,
-            text: currentAnalysis?.text ?? '', // Keep previous interpretation if available
+            text: currentAnalysis?.text ?? '',
             significantGenes: currentAnalysis?.significantGenes
         });
         return;
@@ -200,16 +236,58 @@ const App: React.FC = () => {
     setError(null);
     
     try {
-      const result = await getAnalysisFromGemini(analysisType, degResults);
+      const result = await getAnalysisFromGemini(analysisType, currentData, pValueThreshold);
       setCurrentAnalysis(result);
-// FIX: A typo 'S' was replaced with '{' to correctly form the catch block.
     } catch (e: any) {
       setError(`Analysis failed: ${e.message}`);
     } finally {
       setIsLoading(false);
     }
-  }, [degResults, currentAnalysis]);
+  }, [degResults, currentAnalysis, currentComparison, pValueThreshold]);
+  
+  const handleGseaAnalysis = useCallback(async (db: GseaDatabase) => {
+     if (!degResults || !currentComparison) {
+      setError('Please run the primary Differential Expression Analysis first.');
+      return;
+    }
+    // Check cache first
+    if(gseaResults[currentComparison] && gseaResults[currentComparison][db]) {
+        setCurrentAnalysis({
+            type: 'gsea',
+            text: '',
+            gseaData: { db, results: gseaResults[currentComparison][db]! }
+        });
+        return;
+    }
 
+    setIsLoading(true);
+    setLoadingMessage(`Running GSEA with ${db} database...`);
+    setError(null);
+    
+    try {
+        const currentData = degResults[currentComparison];
+        const results = await rService.runGsea(currentData, db);
+
+        setGseaResults(prev => ({
+            ...prev,
+            [currentComparison]: {
+                ...prev[currentComparison],
+                [db]: results,
+            }
+        }));
+
+        setCurrentAnalysis({
+            type: 'gsea',
+            text: '',
+            gseaData: { db, results }
+        });
+
+    } catch (e: any) {
+        setError(`GSEA analysis failed: ${e.message}`);
+    } finally {
+        setIsLoading(false);
+    }
+  }, [degResults, currentComparison, gseaResults]);
 
   const clearData = () => {
     setCountMatrix(null);
@@ -219,6 +297,8 @@ const App: React.FC = () => {
     setDataFileName('');
     setGeneIdType('unknown');
     setOriginalGeneIdType('unknown');
+    setCurrentComparison(null);
+    setGseaResults({});
     resetChat();
   };
 
@@ -227,18 +307,23 @@ const App: React.FC = () => {
     setCurrentAnalysis(null);
     setDegResults(null);
     setMetadataFileName('');
+    setCurrentComparison(null);
+    setGseaResults({});
     resetChat();
   }
 
+  const currentDegData = currentComparison && degResults ? degResults[currentComparison] : null;
+
   return (
     <div className="flex flex-col h-screen bg-gray-900 font-sans">
-      <Header />
+      <Header onToggleRConsole={() => setIsRConsoleOpen(!isRConsoleOpen)} />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar 
           onCountMatrixUpload={handleCountMatrixUpload} 
           onMetadataUpload={handleMetadataUpload}
           onRunPrimaryAnalysis={handlePrimaryAnalysis}
           onRunSubsequentAnalysis={handleSubsequentAnalysis}
+          onRunGsea={handleGseaAnalysis}
           isDataLoaded={!!countMatrix && !!sampleMetadata}
           isDegComplete={!!degResults}
           isLoading={isLoading || !isRReady}
@@ -249,6 +334,8 @@ const App: React.FC = () => {
           conditions={conditions}
           geneIdType={geneIdType}
           originalGeneIdType={originalGeneIdType}
+          pValueThreshold={pValueThreshold}
+          onPValueThresholdChange={setPValueThreshold}
         />
         <main className="flex-1 p-6 overflow-y-auto">
           <ResultsDisplay
@@ -256,13 +343,22 @@ const App: React.FC = () => {
             loadingMessage={loadingMessage}
             error={error}
             result={currentAnalysis}
-            data={degResults}
+            data={currentDegData}
             countMatrix={countMatrix}
             rService={rService}
+            comparisons={comparisons}
+            currentComparison={currentComparison}
+            onComparisonChange={setCurrentComparison}
+            gseaResults={gseaResults}
           />
         </main>
       </div>
-      {degResults && <Chatbot degResults={degResults} />}
+      {currentDegData && <Chatbot degResults={currentDegData} pValueThreshold={pValueThreshold}/>}
+      <RConsole 
+        isOpen={isRConsoleOpen}
+        onClose={() => setIsRConsoleOpen(false)}
+        logs={rConsoleLogs}
+      />
     </div>
   );
 };
